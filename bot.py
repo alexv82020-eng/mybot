@@ -34,7 +34,7 @@ dp = Dispatcher(storage=MemoryStorage())
 logging.basicConfig(level=logging.INFO)
 
 async def set_bot_commands():
-    """Установка синей кнопки 'Меню' с командами в Telegram"""
+    """Установка меню команд в Telegram"""
     commands = [
         BotCommand(command="start", description="🚀 Запустить авто-мониторинг"),
         BotCommand(command="check", description="🔍 Проверить новые комментарии прямо сейчас")
@@ -60,13 +60,15 @@ async def run_tiktok_check():
 
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Получаем последние 3 видео аккаунта
-            posts_url = f"https://tiktok-api23.p.rapidapi.com/user/posts?unique_id={TIKTOK_USERNAME}&count=3"
+            # 1. Получаем последние 3 видео аккаунта (исправленный URL с /api/)
+            posts_url = f"https://tiktok-api23.p.rapidapi.com/api/user/posts?unique_id={TIKTOK_USERNAME}&count=3"
             async with session.get(posts_url, headers=headers) as resp:
                 if resp.status != 200:
                     return f"❌ Ошибка обращения к TikTok API (Статус: {resp.status})"
                 posts_data = await resp.json()
-                videos = posts_data.get("itemList", [])
+                
+                # Извлекаем список видео с учетом структуры ответа API
+                videos = posts_data.get("data", {}).get("itemList", []) or posts_data.get("itemList", [])
 
             # 2. Проверяем комментарии к каждому видео
             for vid in videos:
@@ -74,12 +76,12 @@ async def run_tiktok_check():
                 video_desc = vid.get("desc", "Видео")
                 video_url = f"https://www.tiktok.com/@{TIKTOK_USERNAME}/video/{video_id}"
                 
-                comments_url = f"https://tiktok-api23.p.rapidapi.com/post/comments?video_id={video_id}&count=10"
+                comments_url = f"https://tiktok-api23.p.rapidapi.com/api/post/comments?video_id={video_id}&count=10"
                 async with session.get(comments_url, headers=headers) as c_resp:
                     if c_resp.status != 200:
                         continue
                     c_data = await c_resp.json()
-                    comments = c_data.get("comments", [])
+                    comments = c_data.get("data", {}).get("comments", []) or c_data.get("comments", [])
 
                     for c in comments:
                         c_id = c.get("cid")
@@ -125,7 +127,7 @@ async def tracker_loop():
     """Фоновый таймер (проверка раз в 12 часов)"""
     while True:
         await run_tiktok_check()
-        await asyncio.sleep(43200) # 12 часов
+        await asyncio.sleep(43200)
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
@@ -134,7 +136,7 @@ async def start_handler(message: types.Message):
     await message.answer(
         "👋 **Мониторинг запущен!**\n\n"
         "🤖 **Штатный режим:** Я автоматически проверяю видео 2 раза в день.\n"
-        "⚡ **Ручной запуск:** Используй меню или команду /check в любой момент, чтобы проверить комментарии прямо сейчас."
+        "⚡ **Ручной запуск:** Используй меню или команду /check в любой момент."
     )
 
 @dp.message(Command("check"))
@@ -155,9 +157,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-    # Регистрируем меню команд в Telegram
     await set_bot_commands()
-
     asyncio.create_task(tracker_loop())
     await dp.start_polling(bot)
 

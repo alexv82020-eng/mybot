@@ -9,7 +9,7 @@ from aiohttp import web
 
 # ================= КОНФИГУРАЦИЯ =================
 TELEGRAM_BOT_TOKEN = "8787596046:AAF3gkZGU9AhVnofbnNwK3YWpmd0w0D4R0s"
-GEMINI_API_KEY = "AQ.Ab8RN6JWG1Xo9qcaU5JOJZFM_0kTidSEgZ9X_tWXhi_hCK340Q"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 SYSTEM_PROMPT = """
 Ты — профессиональный TikTok Growth Agent для аккаунта @eny_engel4 (репатриация в Израиль, жизнь в Хайфе, поиск работы, адаптация).
@@ -26,7 +26,6 @@ A) Заставляют автора ответить
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -34,14 +33,20 @@ logging.basicConfig(level=logging.INFO)
 async def start_handler(message: types.Message):
     await message.answer(
         "👋 **Привет! Я твой TikTok Growth Agent.**\n\n"
-        "Отправь мне ссылку на видео, описание или контекст ролика, "
+        "Отправь мне описание ролика, тему или текст озвучки, "
         "и я сделаю разбор и подберу ТОП комментариев для продвижения!"
     )
 
 @dp.message(F.text)
 async def process_text(message: types.Message):
-    wait_msg = await message.answer("🔄 Анализирую видео и генерирую комментарии...")
+    wait_msg = await message.answer("🔄 Анализирую и генерирую комментарии...")
     try:
+        api_key = os.environ.get("GEMINI_API_KEY", GEMINI_API_KEY)
+        if not api_key:
+            await wait_msg.edit_text("❌ Ошибка: GEMINI_API_KEY не задан в настройках Render (Environment).")
+            return
+
+        ai_client = genai.Client(api_key=api_key)
         response = ai_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=f"Проанализируй контент и дай рекомендации по комментариям:\n\n{message.text}",
@@ -51,14 +56,12 @@ async def process_text(message: types.Message):
         await message.answer(response.text, parse_mode="Markdown")
     except Exception as e:
         logging.error(f"Ошибка при обработке: {e}")
-        await wait_msg.edit_text("❌ Произошла ошибка при вызове Gemini API.")
+        await wait_msg.edit_text(f"❌ Произошла ошибка при вызове Gemini API:\n`{e}`")
 
-# Заглушка для Render Web Service
 async def handle_ping(request):
     return web.Response(text="Bot is alive!")
 
 async def main():
-    # Запуск dummy web-сервера для Render
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
@@ -67,7 +70,6 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-    # Запуск поллинга бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

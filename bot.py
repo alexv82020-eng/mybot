@@ -34,7 +34,6 @@ dp = Dispatcher(storage=MemoryStorage())
 logging.basicConfig(level=logging.INFO)
 
 async def set_bot_commands():
-    """Установка меню команд в Telegram"""
     commands = [
         BotCommand(command="start", description="🚀 Запустить авто-мониторинг"),
         BotCommand(command="check", description="🔍 Проверить новые комментарии прямо сейчас")
@@ -42,7 +41,6 @@ async def set_bot_commands():
     await bot.set_my_commands(commands)
 
 async def run_tiktok_check():
-    """Основная функция проверки видео и комментариев"""
     global CHAT_ID_FOR_NOTIFICATIONS, PROCESSED_COMMENTS
     
     if not CHAT_ID_FOR_NOTIFICATIONS:
@@ -60,18 +58,18 @@ async def run_tiktok_check():
 
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Получаем последние 3 видео аккаунта (исправленный URL с /api/)
+            # 1. Получаем последние 3 видео
             posts_url = f"https://tiktok-api23.p.rapidapi.com/api/user/posts?unique_id={TIKTOK_USERNAME}&count=3"
             async with session.get(posts_url, headers=headers) as resp:
                 if resp.status != 200:
-                    return f"❌ Ошибка обращения к TikTok API (Статус: {resp.status})"
+                    return f"❌ Ошибка обращения к TikTok API при поиске видео (Статус: {resp.status})"
                 posts_data = await resp.json()
-                
-                # Извлекаем список видео с учетом структуры ответа API
                 videos = posts_data.get("data", {}).get("itemList", []) or posts_data.get("itemList", [])
 
-            # 2. Проверяем комментарии к каждому видео
+            # 2. Проверяем комментарии к каждому видео с ПАУЗОЙ
             for vid in videos:
+                await asyncio.sleep(3) # <--- Задержка в 3 секунды, чтобы RapidAPI не выдавал ошибку 429
+                
                 video_id = vid.get("id")
                 video_desc = vid.get("desc", "Видео")
                 video_url = f"https://www.tiktok.com/@{TIKTOK_USERNAME}/video/{video_id}"
@@ -79,7 +77,9 @@ async def run_tiktok_check():
                 comments_url = f"https://tiktok-api23.p.rapidapi.com/api/post/comments?video_id={video_id}&count=10"
                 async with session.get(comments_url, headers=headers) as c_resp:
                     if c_resp.status != 200:
+                        logging.error(f"Ошибка получения комментариев для {video_id}, статус {c_resp.status}")
                         continue
+                    
                     c_data = await c_resp.json()
                     comments = c_data.get("data", {}).get("comments", []) or c_data.get("comments", [])
 
@@ -92,7 +92,6 @@ async def run_tiktok_check():
                             PROCESSED_COMMENTS.add(c_id)
                             found_new = True
 
-                            # Анализ через Gemini
                             ai_client = genai.Client(api_key=GEMINI_API_KEY)
                             prompt_text = (
                                 f"Видео: '{video_desc}'\n"
@@ -124,7 +123,6 @@ async def run_tiktok_check():
         return f"❌ Произошла ошибка: {e}"
 
 async def tracker_loop():
-    """Фоновый таймер (проверка раз в 12 часов)"""
     while True:
         await run_tiktok_check()
         await asyncio.sleep(43200)
@@ -141,7 +139,7 @@ async def start_handler(message: types.Message):
 
 @dp.message(Command("check"))
 async def manual_check_handler(message: types.Message):
-    await message.answer("🔍 Запускаю ручную проверку TikTok...")
+    await message.answer("🔍 Запускаю ручную проверку TikTok... Пожалуйста, подожди около 10 секунд.")
     result_text = await run_tiktok_check()
     await message.answer(result_text)
 

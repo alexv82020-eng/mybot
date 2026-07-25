@@ -14,21 +14,17 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "")
 
 CHAT_ID_FOR_NOTIFICATIONS = None
-LAST_VIDEO_ID = None
+PROCESSED_COMMENTS = set()
 
 TIKTOK_USERNAME = "eny_engel4"
 
 SYSTEM_PROMPT = """
-Ты — профессиональный TikTok Growth Agent для аккаунта @eny_engel4 (репатриация в Израиль, жизнь в Хайфе, поиск работы, адаптация).
-Твоя задача — проанализировать суть нового видео и создать 10 вовлекающих комментариев по категориям:
-A) Заставляют автора ответить
-Б) Вызывают спор или обсуждение
-В) Поддержка
-Г) Личный опыт
-Д) Вопросы к аудитории
-
-Для каждого комментария ставь оценки (0-10) на шанс ответа, лайков и дискуссии. Выбирай ТОП-3 и объясняй выбор.
-Пиши как живой человек, учитывай контекст Израиля и русскоязычных эмигрантов.
+Ты — SMM Growth Agent и эксперт по алгоритмам TikTok для аккаунта @eny_engel4 (репатриация, жизнь в Израиле, Хайфа, адаптация).
+Тебе передают комментарии под видео.
+Твоя задача:
+1. Оценить важность комментария для продвижения ролика (от 0 до 10).
+2. Сформулировать идеальный ответ от имени автора, который спровоцирует пользователя или других зрителей продолжить дискуссию в ветке.
+3. Коротко объяснить стратегию этого ответа.
 """
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -36,14 +32,12 @@ dp = Dispatcher(storage=MemoryStorage())
 
 logging.basicConfig(level=logging.INFO)
 
-async def check_tiktok_and_generate():
-    global LAST_VIDEO_ID, CHAT_ID_FOR_NOTIFICATIONS
+async def check_comments_and_analyze():
+    global CHAT_ID_FOR_NOTIFICATIONS, PROCESSED_COMMENTS
     
-    # Если бот ещё не знает кому слать или нет ключа RapidAPI
     if not CHAT_ID_FOR_NOTIFICATIONS or not RAPIDAPI_KEY or not GEMINI_API_KEY:
         return
 
-    url = f"https://tiktok-api23.p.rapidapi.com/user/posts?unique_id={TIKTOK_USERNAME}&count=1"
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
         "x-rapidapi-host": "tiktok-api23.p.rapidapi.com"
@@ -51,57 +45,76 @@ async def check_tiktok_and_generate():
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    videos = data.get("itemList", [])
-                    if videos:
-                        latest_video = videos[0]
-                        video_id = latest_video.get("id")
-                        video_desc = latest_video.get("desc", "Без описания")
-                        video_url = f"https://www.tiktok.com/@{TIKTOK_USERNAME}/video/{video_id}"
+            # 1. Получаем последние 3 видео аккаунта
+            posts_url = f"https://tiktok-api23.p.rapidapi.com/user/posts?unique_id={TIKTOK_USERNAME}&count=3"
+            async with session.get(posts_url, headers=headers) as resp:
+                if resp.status != 200:
+                    return
+                posts_data = await resp.json()
+                videos = posts_data.get("itemList", [])
 
-                        # При первом запуске просто запоминаем последнее видео
-                        if LAST_VIDEO_ID is None:
-                            LAST_VIDEO_ID = video_id
-                        # Если появилось НОВОЕ видео:
-                        elif LAST_VIDEO_ID != video_id:
-                            LAST_VIDEO_ID = video_id
-                            
-                            # Бот передает информацию Gemini
+            # 2. Проверяем комментарии к каждому из 3 видео
+            for vid in videos:
+                video_id = vid.get("id")
+                video_desc = vid.get("desc", "Видео")
+                video_url = f"https://www.tiktok.com/@{TIKTOK_USERNAME}/video/{video_id}"
+                
+                comments_url = f"https://tiktok-api23.p.rapidapi.com/post/comments?video_id={video_id}&count=10"
+                async with session.get(comments_url, headers=headers) as c_resp:
+                    if c_resp.status != 200:
+                        continue
+                    c_data = await c_resp.json()
+                    comments = c_data.get("comments", [])
+
+                    for c in comments:
+                        c_id = c.get("cid")
+                        c_text = c.get("text")
+                        user_nickname = c.get("user", {}).get("nickname", "Зритель")
+
+                        if c_id not in PROCESSED_COMMENTS:
+                            PROCESSED_COMMENTS.add(c_id)
+
+                            # Передаем контекст мне (Gemini)
                             ai_client = genai.Client(api_key=GEMINI_API_KEY)
+                            prompt_text = (
+                                f"Видео: '{video_desc}'\n"
+                                f"Комментарий от {user_nickname}: '{c_text}'\n\n"
+                                f"Дай оценку и лучший вариант ответа для раскрутки этого видео."
+                            )
                             response = ai_client.models.generate_content(
                                 model="gemini-2.5-flash",
-                                contents=f"Вышло новое видео на канале! Вот его описание/текст: {video_desc}",
+                                contents=prompt_text,
                                 config={"system_instruction": SYSTEM_PROMPT}
                             )
 
-                            # Бот отправляет итоговый разбор пользователю
-                            msg_text = (
-                                f"🔔 **Вышло новое видео на канале @{TIKTOK_USERNAME}!**\n\n"
-                                f"📝 **Суть/Описание:** {video_desc}\n"
-                                f"🔗 **Ссылка:** {video_url}\n\n"
+                            msg = (
+                                f"📩 **Новая активность под видео!**\n\n"
+                                f"🎬 **Ролик:** {video_desc}\n"
+                                f"🔗 **Ссылка:** {video_url}\n"
+                                f"👤 **{user_nickname}:** `{c_text}`\n\n"
                                 f"-----------------------------------\n"
-                                f"💡 **Готовые комментарии от Gemini:**\n\n{response.text}"
+                                f"💡 **Стратегия ответа от Gemini:**\n\n{response.text}"
                             )
+                            await bot.send_message(CHAT_ID_FOR_NOTIFICATIONS, msg, parse_mode="Markdown")
 
-                            await bot.send_message(CHAT_ID_FOR_NOTIFICATIONS, msg_text, parse_mode="Markdown")
     except Exception as e:
-        logging.error(f"Ошибка проверки TikTok: {e}")
+        logging.error(f"Ошибка при проверке комментариев: {e}")
 
-async def tiktok_tracker_loop():
+async def tracker_loop():
     while True:
-        await check_tiktok_and_generate()
-        await asyncio.sleep(1800)  # Проверять каждые 30 минут
+        await check_comments_and_analyze()
+        # Проверка 2 раза в сутки (каждые 12 часов = 43200 секунд)
+        await asyncio.sleep(43200)
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     global CHAT_ID_FOR_NOTIFICATIONS
     CHAT_ID_FOR_NOTIFICATIONS = message.chat.id
     await message.answer(
-        "👋 **Автоматическое отслеживание включено!**\n\n"
-        f"Я слежу за каналом `@ {TIKTOK_USERNAME}`. Как только выйдет новое видео, "
-        "я сам передам его Gemini, сформирую готовые комментарии и пришлю их тебе сюда."
+        "👋 **Умный мониторинг запущен!**\n\n"
+        "Я буду 2 раза в день проверять активность под твоими видео. "
+        "Как только появятся важные комментарии — я сам запрошу у Gemini "
+        "лучшие варианты ответов и пришлю их тебе сюда."
     )
 
 async def handle_ping(request):
@@ -116,9 +129,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-    # Запуск фоновой проверки TikTok
-    asyncio.create_task(tiktok_tracker_loop())
-
+    asyncio.create_task(tracker_loop())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

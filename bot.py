@@ -4,6 +4,7 @@ import logging
 import aiohttp
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
+from aiogram.types import BotCommand
 from aiogram.fsm.storage.memory import MemoryStorage
 from google import genai
 from aiohttp import web
@@ -32,16 +33,30 @@ dp = Dispatcher(storage=MemoryStorage())
 
 logging.basicConfig(level=logging.INFO)
 
-async def check_comments_and_analyze():
+async def set_bot_commands():
+    """Установка синей кнопки 'Меню' с командами в Telegram"""
+    commands = [
+        BotCommand(command="start", description="🚀 Запустить авто-мониторинг"),
+        BotCommand(command="check", description="🔍 Проверить новые комментарии прямо сейчас")
+    ]
+    await bot.set_my_commands(commands)
+
+async def run_tiktok_check():
+    """Основная функция проверки видео и комментариев"""
     global CHAT_ID_FOR_NOTIFICATIONS, PROCESSED_COMMENTS
     
-    if not CHAT_ID_FOR_NOTIFICATIONS or not RAPIDAPI_KEY or not GEMINI_API_KEY:
-        return
+    if not CHAT_ID_FOR_NOTIFICATIONS:
+        return "⚠️ Сначала отправь боту команду /start, чтобы зафиксировать чат."
+    
+    if not RAPIDAPI_KEY or not GEMINI_API_KEY:
+        return "⚠️ Не заданы API ключи в настройках Render."
 
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
         "x-rapidapi-host": "tiktok-api23.p.rapidapi.com"
     }
+
+    found_new = False
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -49,11 +64,11 @@ async def check_comments_and_analyze():
             posts_url = f"https://tiktok-api23.p.rapidapi.com/user/posts?unique_id={TIKTOK_USERNAME}&count=3"
             async with session.get(posts_url, headers=headers) as resp:
                 if resp.status != 200:
-                    return
+                    return f"❌ Ошибка обращения к TikTok API (Статус: {resp.status})"
                 posts_data = await resp.json()
                 videos = posts_data.get("itemList", [])
 
-            # 2. Проверяем комментарии к каждому из 3 видео
+            # 2. Проверяем комментарии к каждому видео
             for vid in videos:
                 video_id = vid.get("id")
                 video_desc = vid.get("desc", "Видео")
@@ -73,8 +88,9 @@ async def check_comments_and_analyze():
 
                         if c_id not in PROCESSED_COMMENTS:
                             PROCESSED_COMMENTS.add(c_id)
+                            found_new = True
 
-                            # Передаем контекст мне (Gemini)
+                            # Анализ через Gemini
                             ai_client = genai.Client(api_key=GEMINI_API_KEY)
                             prompt_text = (
                                 f"Видео: '{video_desc}'\n"
@@ -97,25 +113,35 @@ async def check_comments_and_analyze():
                             )
                             await bot.send_message(CHAT_ID_FOR_NOTIFICATIONS, msg, parse_mode="Markdown")
 
+            if not found_new:
+                return "ℹ️ Новых комментариев под последними видео пока нет."
+            return "✅ Ручная проверка завершена, новые комментарии отправлены выше!"
+
     except Exception as e:
-        logging.error(f"Ошибка при проверке комментариев: {e}")
+        logging.error(f"Ошибка проверки: {e}")
+        return f"❌ Произошла ошибка: {e}"
 
 async def tracker_loop():
+    """Фоновый таймер (проверка раз в 12 часов)"""
     while True:
-        await check_comments_and_analyze()
-        # Проверка 2 раза в сутки (каждые 12 часов = 43200 секунд)
-        await asyncio.sleep(43200)
+        await run_tiktok_check()
+        await asyncio.sleep(43200) # 12 часов
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     global CHAT_ID_FOR_NOTIFICATIONS
     CHAT_ID_FOR_NOTIFICATIONS = message.chat.id
     await message.answer(
-        "👋 **Умный мониторинг запущен!**\n\n"
-        "Я буду 2 раза в день проверять активность под твоими видео. "
-        "Как только появятся важные комментарии — я сам запрошу у Gemini "
-        "лучшие варианты ответов и пришлю их тебе сюда."
+        "👋 **Мониторинг запущен!**\n\n"
+        "🤖 **Штатный режим:** Я автоматически проверяю видео 2 раза в день.\n"
+        "⚡ **Ручной запуск:** Используй меню или команду /check в любой момент, чтобы проверить комментарии прямо сейчас."
     )
+
+@dp.message(Command("check"))
+async def manual_check_handler(message: types.Message):
+    await message.answer("🔍 Запускаю ручную проверку TikTok...")
+    result_text = await run_tiktok_check()
+    await message.answer(result_text)
 
 async def handle_ping(request):
     return web.Response(text="Bot is alive!")
@@ -128,6 +154,9 @@ async def main():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
+
+    # Регистрируем меню команд в Telegram
+    await set_bot_commands()
 
     asyncio.create_task(tracker_loop())
     await dp.start_polling(bot)
